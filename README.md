@@ -3,8 +3,6 @@ Data Repository for the submitted article:
 
 Edge-based Modeling for Disease Transmission on Random Graphs: An Application to Mitigate a Syphilis Outbreak
 
-Submission recently to Journal of Royal Society: Interface
-
 arXiv: TBD
 
 ## Authorship: 
@@ -33,3 +31,5 @@ Repository: Sicheng Zhao (20sz11@queensu.ca, zhaos126@mcmaster.ca)
 2. [Time Distribution 19-23_ReInfection.xlsx](Time_Distribution_19-23_ReInfection.xlsx): Aggregated and anonymized data for syphilis stages of reported cases and encounter date, together with the "recovery date" after adjustment described in the article. Used to generate the incident data and the recovery time distribution
 
 3. [Time Test Adj.csv](Time_Test_Adj.csv): Biweekly aggregated reported casecount after adjustment for treament duration used for fitting the parameters of model.
+
+4. [R-EpiNecPerco](R-EpiNetPerco): functions from R-EpiNetPerco used to percolation process calculation in the article
