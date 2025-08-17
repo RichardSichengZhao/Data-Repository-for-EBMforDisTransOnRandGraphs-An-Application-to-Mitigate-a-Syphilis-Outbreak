@@ -1,0 +1,233 @@
+library(shiny)
+library(bslib)
+library(pracma)
+library(gsl)
+library(deSolve)
+library(ggplot2)
+library(rriskDistributions)
+library(tidyr)
+library(cbinom)
+library(bsicons)
+wd <- getwd()
+source(paste0(wd,'/Function.R'))
+
+vbs <- list(
+  value_box(
+    title = "Final Size of Base Model",
+    value = textOutput("OptSize"),
+    showcase = bs_icon("graph-up"),
+    theme = "purple",
+    p("Basic Reproductive Number:",textOutput("OptR0")),
+    p("Infected Proportion %:", textOutput("OptRInf"))
+  ),
+  value_box(
+    title = "Final Size with POCT",
+    value = textOutput("POCTSize"),
+    showcase = bs_icon("graph-down"),
+    theme = "orange",
+    p("Basic Reproductive Number:",textOutput("POCTR0")),
+    p("Infected Proportion %:", textOutput("POCTRInf"))
+  )
+)
+
+
+ui <- page_sidebar(
+  title = "Syphilis in KFL&A with POCT intervention",
+  sidebar = sidebar(p("Estimate population size: N=26,000")
+                    , position = "left"
+                    , style = "font-size:75%"
+                    , sliderInput(  "POCTtime"
+                                  , "POCT Implementation Time (Default=116 bi-weeks)"
+                                  , min = 0
+                                  , max = 200
+                                  , value = 116
+                                  )
+                    , sliderInput(  "TATadj"
+                                  , "POCT TAT reduction (Est=9d)"
+                                  , min = 0
+                                  , max = 9
+                                  , value = 9
+                                  )
+                    , sliderInput(  "pplus"
+                                  , "POCT Reporing Probablity Increase %"
+                                  , min = 0
+                                  , max = 25
+                                  , value = 5
+                                  )
+                    )
+  , card(  "Bi-weekly Projection and Prediction Curve of Infected Proportion"
+           , plotOutput("incplot", height = "1000px")
+       )
+  , layout_column_wrap(
+    width = "320px",
+    height = "200px",
+    fill = FALSE,
+    vbs[[1]], vbs[[2]]
+  )
+)
+
+server <- function(input, output) {
+  withProgress(message = 'Loading and preparing base model ...', value = 0, style = "old", {
+    start = Sys.time()
+    
+    CM_Opt <- ModProc_CM(DDist,Optbeta,Gamma_fit,ODEmaxTime = 400, ODEstep = 2e-1,init_theta = it_theta,TrackDyn = T)
+    Opt_R0 <- CM_Opt$R0
+    Opt_RInf <- CM_Opt$RInfinity
+    Opt_Rsize <- Opt_RInf*N
+    
+    CM_Base <- CM_Opt
+    CM_Base_Out <- as.data.frame(CM_Base$Dynamic)
+    
+    end = Sys.time()
+    showNotification(sprintf("Took %.2f seconds to load and prepare model", end - start))
+  })
+  
+  output$OptSize <- renderText(Opt_Rsize)
+  output$OptR0 <- renderText(Opt_R0)
+  output$OptRInf <- renderText(round(Opt_RInf*100,2))
+  
+  POCT <- reactive(withProgress(message = 'Generating Scenario Simulations ...', value = 0, style = "old", {
+    start = Sys.time()
+    
+    # POCT implementation Time
+    fitend_tps <- input$POCTtime
+    # Reduce TAT time
+    TAT_time <- input$TATadj
+    # Reporting Probability Adjustment
+    p_plus <- (input$pplus)/100
+    # beta would not change
+    POCT_beta <- Optbeta
+    
+    stageC <- c(89,88,72,34,9)
+    stageT <- c(4,10,26,130,130)
+    
+    left <- c(0,4,10,26)
+    right <- stageT[1:4]
+    
+    POCT_p <- c(Optp+p_plus)
+    p <- POCT_p
+    # Reported is just p proportion of cases
+    # All cases not reported will develop to Late Latent stage and become "recovered"
+    StageN <- sum(stageC)/p
+    StageDC <- stageC[5]/max(stageT)*(right-left)+stageC[1:4]
+    StageDP <- c(1:3)
+    
+    for (j in c(1:3)) {
+      StageDP[j] <- sum(StageDC[1:j])/StageN
+    }
+    # Only reported patient get 9 days TAT adjustment
+    StageDQ <- left[2:4]-c(TAT_time/14,TAT_time/14,0)
+    
+    #### Adding an End Constraint as the third percentile
+    StageDP[3] <- 1
+    StageDQ[3] <- 26
+    
+    StageDP <- sort(StageDP)
+    StageDQ <- sort(StageDQ)
+    
+    fitexp <- get.eexp.par(  StageDP
+                             , StageDQ
+                             , fit.weight=c(1,1,1)
+                             , tol = 0.02
+                             , show.output = FALSE
+                             , plot = F)
+    
+    if (is.null(fitexp$par) == TRUE){
+      gamma <- 0
+    } else {
+      gamma <- fitexp$par
+    }
+    POCT_Gamma <- gamma
+    
+    Fitend_status <- CM_Base_Out[fitend_tps*5+1,]
+    # print(Fitend_status)
+    
+    it_theta_now <- as.numeric(1-Fitend_status[2])
+    it_R_now <- as.numeric(Fitend_status[3])
+    #ModProc_CM()
+    CM_Base <- CM_Opt
+    CM_Base_Out <- as.data.frame(CM_Base$Dynamic)
+    
+    POCT_now <- ModProc_CM(DDist,POCT_beta,POCT_Gamma, init_theta=it_theta_now, ODEmaxTime = 400-fitend_tps,ODEstep = 2e-1,init_R = it_R_now)
+    POCT_now_matrix <- POCT_now$Dynamic
+    POCT_now_matrix[,1] <- POCT_now_matrix[,1]+fitend_tps
+    POCT_now_Out <- as.data.frame(POCT_now_matrix)
+    
+    print(POCT_now$R0)
+    
+    end = Sys.time()
+    showNotification(sprintf("Took %.2f seconds to generate simulations", end - start))
+    return(list(  POCT_now_Out=POCT_now_Out
+                , POCT_R0=POCT_now$R0
+                , POCT_RInf=POCT_now$RInfinity
+                , POCT_Rsize=POCT_now$RInfinity*N)
+           )
+  }))
+  
+  output$incplot <- renderPlot({
+    withProgress(message = 'Plotting simulations ...', value = 0, style = "old", {
+      start = Sys.time()
+      
+      POCT<-POCT()
+      POCT_now_Out<-POCT$POCT_now_Out
+      fitend_tps <- input$POCTtime
+      TAT_time <- input$TATadj
+      p_plus <- (input$pplus)/100
+      
+      #### ggplot
+      comboplot <- (ggplot()+theme_classic()+
+        geom_line(data = CM_Base_Out,aes(x=time,y=I_out,color="Base Model"
+                                         #,linetype="Ongoing"
+        ),size=0.6)+
+        geom_line(data = POCT_now_Out,aes(x=time,y=I_out, color="POCT"
+                                          #, linetype="Ongoing"
+        ),size=0.6)+
+        geom_vline(xintercept = 116,linewidth=0.4,linetype=1,show.legend =TRUE)+
+        geom_vline(xintercept = fitend_tps,linewidth=0.6,color="orange",linetype=2,show.legend = TRUE)+
+        labs(color="Rate Change"
+             , linetype="Implement Time"
+             , x="Time (bi-week)", y="Active"~italic('I')~"proportion")+
+        theme(legend.position = "bottom")+
+        xlim(0,400)+
+        ylim(0,NA)+
+        scale_color_manual(  labels=c(  "Optimal Base Model"
+                                      , bquote("POCT "~italic('p')*+.(p_plus)*" TAT"-.(TAT_time)*"d")
+                                      )
+                             , breaks=c(  "Base Model"
+                                          , "POCT")
+                             , values=c(  "Base Model"="purple"
+                                          , "POCT"="orange")
+        )+
+        annotate("text",x=116,y=0.012,label="t=116 data end",size=2)+
+        annotate("text",x=fitend_tps,y=0.011, label=bquote("t="*.(fitend_tps)*" POCT implemented"),size=2,color="orange")+
+        guides(color=guide_legend(ncol=2,bycol=T)))
+
+      print(comboplot)
+      end = Sys.time()
+      showNotification(sprintf("Took %.2f seconds to plot simulations", end - start))
+    })
+  })
+
+  output$POCTSize <- renderText({
+    POCT <- POCT()
+    RSize <- POCT$POCT_Rsize
+    print(RSize)
+  })
+  
+  output$POCTR0 <- renderText({
+    POCT <- POCT()
+    R0 <- POCT$POCT_R0
+    print(R0)
+  })
+  
+  output$POCTRInf <- renderText(
+    {
+      POCT <- POCT()
+      POCT_RInf <- POCT$POCT_RInf
+      print(round(POCT_RInf*100,2))
+    }
+    )
+}
+
+# Run the app ----
+shinyApp(ui = ui, server = server)
